@@ -1,0 +1,179 @@
+# DQE-One Django application (adapted from cloudrun.yml)
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${name}-dqeone
+  namespace: "${namespace}"
+  labels:
+    app.kubernetes.io/name: "${name}"
+    app.kubernetes.io/component: dqeone
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8001
+      targetPort: 8001
+  selector:
+    app.kubernetes.io/name: "${name}"
+    app.kubernetes.io/component: dqeone
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${name}-dqeone
+  namespace: "${namespace}"
+  labels:
+    app.kubernetes.io/name: "${name}"
+    app.kubernetes.io/component: dqeone
+spec:
+  replicas: 1   # Django migrations run at startup: scale to N once migrations are moved out of the entrypoint
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: "${name}"
+      app.kubernetes.io/component: dqeone
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: "${name}"
+        app.kubernetes.io/component: dqeone
+    spec:
+      initContainers:
+        # Wait until Postgres accepts connections before running migrations
+        - name: wait-for-db
+          image: "${imagePostgresql}"
+          command:
+            - sh
+            - -c
+            - until pg_isready -h ${name}-postgresql -p 5432; do echo "waiting for postgres"; sleep 3; done
+      containers:
+        - name: dqeone-app
+          image: "${imageDqeOne}"
+          command: ["bash", "./entrypoint.sh"]
+          ports:
+            - name: http
+              containerPort: 8001
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          env:
+            # ── Database (bundled PostgreSQL) ─────────────────────────────
+            - name: DB_HOST
+              value: ${name}-postgresql
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_NAME
+              value: dqeone
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ${name}-secrets
+                  key: db-user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ${name}-secrets
+                  key: db-password
+            # ── Redis (bundled) ───────────────────────────────────────────
+            - name: REDIS_URL
+              value: redis://${name}-redis:6379
+            # ── Application secrets ──────────────────────────────────────
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ${name}-secrets
+                  key: secret-key
+            - name: SECRET_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ${name}-secrets
+                  key: encryption-key
+            - name: DQE_CLIENT_LICENCE
+              valueFrom:
+                secretKeyRef:
+                  name: ${name}-secrets
+                  key: licence
+            # ── Admin configuration ──────────────────────────────────────
+            - name: DQE_ONE_SERVER_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ${name}-secrets
+                  key: admin-user
+            - name: DQE_ONE_SERVER_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ${name}-secrets
+                  key: admin-password
+            # ── Application settings ─────────────────────────────────────
+            - name: PORT
+              value: "8001"
+            - name: DEBUG
+              value: "False"
+            # On Kubernetes, HTTPS is terminated in front of the app (Ingress /
+            # Load Balancer). No redirect in Django: otherwise redirect loop
+            # with port-forward or behind a proxy that does not send
+            # X-Forwarded-Proto. Cookies stay "Secure" (required with
+            # SameSite=None): browsers accept them on http://localhost and HTTPS.
+            - name: SECURE_SSL_REDIRECT
+              value: "False"
+            # Allowed domains (ALLOWED_HOSTS / CSRF_TRUSTED_ORIGINS / APP_DOMAIN).
+            # Customer domain FIRST (read by APP_DOMAIN), then local access
+            # (port-forward, probes). If appDomain is empty, the leading comma
+            # produces an empty entry, which settings.py ignores.
+            - name: WEBSITE_HOSTNAME
+              value: "${appDomain},localhost,127.0.0.1"
+            - name: CREATE_SUPERUSER
+              value: "true"
+            - name: RUN_COLLECTSTATIC
+              value: "true"
+            - name: AUTHORIZED_SFTP_HOSTS
+              value: depot-1.dqe-software.net
+            - name: SFAPIVERSION
+              value: "63.0"
+            - name: DB_MAX_CAPACITY
+              value: "8000000000"
+          startupProbe:
+            httpGet:
+              path: /login
+              port: 8001
+              # Host: localhost -> always in ALLOWED_HOSTS, whatever the customer
+              # domain (otherwise Django answers 400 to the pod IP)
+              # X-Forwarded-Proto -> request seen as HTTPS (as on Cloud Run)
+              httpHeaders:
+                - name: Host
+                  value: localhost
+                - name: X-Forwarded-Proto
+                  value: https
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 12   # 2 min max for migrations
+          readinessProbe:
+            httpGet:
+              path: /login
+              port: 8001
+              # Host: localhost -> always in ALLOWED_HOSTS, whatever the customer
+              # domain (otherwise Django answers 400 to the pod IP)
+              # X-Forwarded-Proto -> request seen as HTTPS (as on Cloud Run)
+              httpHeaders:
+                - name: Host
+                  value: localhost
+                - name: X-Forwarded-Proto
+                  value: https
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /login
+              port: 8001
+              # Host: localhost -> always in ALLOWED_HOSTS, whatever the customer
+              # domain (otherwise Django answers 400 to the pod IP)
+              # X-Forwarded-Proto -> request seen as HTTPS (as on Cloud Run)
+              httpHeaders:
+                - name: Host
+                  value: localhost
+                - name: X-Forwarded-Proto
+                  value: https
+            periodSeconds: 30
+            failureThreshold: 3

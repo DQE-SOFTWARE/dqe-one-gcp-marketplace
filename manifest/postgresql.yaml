@@ -1,0 +1,92 @@
+# Bundled PostgreSQL (replaces Cloud SQL from the Cloud Run deployment)
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${name}-postgresql
+  namespace: "${namespace}"
+  labels:
+    app.kubernetes.io/name: "${name}"
+    app.kubernetes.io/component: postgresql
+spec:
+  clusterIP: None
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: 5432
+  selector:
+    app.kubernetes.io/name: "${name}"
+    app.kubernetes.io/component: postgresql
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ${name}-postgresql
+  namespace: "${namespace}"
+  labels:
+    app.kubernetes.io/name: "${name}"
+    app.kubernetes.io/component: postgresql
+spec:
+  serviceName: ${name}-postgresql
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: "${name}"
+      app.kubernetes.io/component: postgresql
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: "${name}"
+        app.kubernetes.io/component: postgresql
+    spec:
+      securityContext:
+        fsGroup: 999
+      containers:
+        - name: postgresql
+          image: "${imagePostgresql}"
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: dqeone
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ${name}-secrets
+                  key: db-user
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ${name}-secrets
+                  key: db-password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata   # avoids the disk lost+found directory
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U dqeone -d dqeone"]
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U dqeone -d dqeone"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: "${name}"
+          app.kubernetes.io/component: postgresql
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: "${postgresqlDiskSize}"
